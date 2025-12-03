@@ -5,8 +5,11 @@ import {
   generateSigningKeyPair,
   generateECDHKeyPair,
   exportPublicKey,
+  exportPublicKeySPKI,
   importECDSAPublicKey,
   importECDHPublicKey,
+  importECDHPublicKeyFromSPKI,
+  importECDSAPublicKeyFromSPKI,
   signData,
   verifySignature,
   deriveSharedSecret,
@@ -87,7 +90,7 @@ export function useCrypto() {
 
       // Generate ephemeral ECDH key pair
       const ephemeralKeyPair = await generateECDHKeyPair()
-      const ephemeralPublicKey = await exportPublicKey(ephemeralKeyPair.publicKey)
+      const ephemeralPublicKey = await exportPublicKeySPKI(ephemeralKeyPair.publicKey)
 
       const timestamp = Date.now()
       const nonce = generateNonce()
@@ -134,8 +137,16 @@ export function useCrypto() {
       // Import sender's identity public key and verify signature
       const senderIdentityKey = await importECDSAPublicKey(senderPublicKey)
       const dataToVerify = `${ephemeralPublicKey}:${currentUserId}:${timestamp}:${nonce}`
-
       const isValid = await verifySignature(senderIdentityKey, signature, dataToVerify)
+      if (!isValid) {
+        console.error("Signature verification failed on responder. Debug info:", {
+          senderId,
+          senderPublicKey,
+          ephemeralPublicKey,
+          signature,
+          dataToVerify,
+        })
+      }
 
       if (!isValid) {
         throw new Error("Invalid signature - possible MITM attack")
@@ -143,7 +154,7 @@ export function useCrypto() {
 
       // Generate responder's ephemeral ECDH key pair
       const responseKeyPair = await generateECDHKeyPair()
-      const responseEphemeralPublicKey = await exportPublicKey(responseKeyPair.publicKey)
+      const responseEphemeralPublicKey = await exportPublicKeySPKI(responseKeyPair.publicKey)
 
       const responseTimestamp = Date.now()
       const responseNonce = generateNonce()
@@ -152,7 +163,7 @@ export function useCrypto() {
       const responseSignature = await signData(identityKeyPair.privateKey, responseDataToSign)
 
       // Import sender's ephemeral public key and derive shared secret
-      const senderEphemeralKey = await importECDHPublicKey(ephemeralPublicKey)
+      const senderEphemeralKey = await importECDHPublicKeyFromSPKI(ephemeralPublicKey)
       const sharedSecret = await deriveSharedSecret(responseKeyPair.privateKey, senderEphemeralKey)
 
       const salt = `${nonce}:${responseNonce}`
@@ -206,11 +217,18 @@ export function useCrypto() {
       const isValid = await verifySignature(recipientIdentityKey, responseSignature, dataToVerify)
 
       if (!isValid) {
+        console.error("Signature verification failed on initiator when verifying responder's signature. Debug info:", {
+          recipientId,
+          recipientPublicKey,
+          responseEphemeralPublicKey,
+          responseSignature,
+          dataToVerify,
+        })
         throw new Error("Invalid response signature - possible MITM attack")
       }
 
       // Import responder's ephemeral public key and derive shared secret
-      const responderEphemeralKey = await importECDHPublicKey(responseEphemeralPublicKey)
+      const responderEphemeralKey = await importECDHPublicKeyFromSPKI(responseEphemeralPublicKey)
       const sharedSecret = await deriveSharedSecret(ephemeralPrivateKey, responderEphemeralKey)
 
       const salt = `${originalNonce}:${responseNonce}`

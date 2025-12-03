@@ -31,6 +31,12 @@ export async function exportPublicKey(key: CryptoKey): Promise<string> {
   return JSON.stringify(jwk)
 }
 
+// Export public key in SPKI format and base64-encode it for canonical representation
+export async function exportPublicKeySPKI(key: CryptoKey): Promise<string> {
+  const spki = await crypto.subtle.exportKey("spki", key)
+  return arrayBufferToBase64(spki)
+}
+
 // Import public key from JWK format
 export async function importECDSAPublicKey(jwkString: string): Promise<CryptoKey> {
   const jwk = JSON.parse(jwkString)
@@ -58,6 +64,34 @@ export async function importECDHPublicKey(jwkString: string): Promise<CryptoKey>
     },
     true,
     [],
+  )
+}
+
+// Import ECDH public key from base64-encoded SPKI
+export async function importECDHPublicKeyFromSPKI(spkiBase64: string): Promise<CryptoKey> {
+  return await crypto.subtle.importKey(
+    "spki",
+    base64ToArrayBuffer(spkiBase64),
+    {
+      name: "ECDH",
+      namedCurve: "P-256",
+    },
+    true,
+    [],
+  )
+}
+
+// Import ECDSA public key from base64-encoded SPKI
+export async function importECDSAPublicKeyFromSPKI(spkiBase64: string): Promise<CryptoKey> {
+  return await crypto.subtle.importKey(
+    "spki",
+    base64ToArrayBuffer(spkiBase64),
+    {
+      name: "ECDSA",
+      namedCurve: "P-256",
+    },
+    true,
+    ["verify"],
   )
 }
 
