@@ -11,6 +11,7 @@ import { useSocket } from "@/hooks/use-socket"
 import type { Message, KeyExchangeMessage } from "@/lib/types"
 import { Shield, Key, Lock } from "lucide-react"
 import type { KeyConfirmationMessage } from "@/lib/types" // Declare the variable here
+import { TwoFactorSetup } from "@/components/two-factor-setup"
 
 const API_URL = "http://localhost:5000"
 
@@ -40,6 +41,7 @@ export default function Home() {
 
   // UI state
   const [showLogs, setShowLogs] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [showKeyExchange, setShowKeyExchange] = useState(false)
   const [keyExchangeStep, setKeyExchangeStep] = useState(0)
   const [keyExchangeError, setKeyExchangeError] = useState<string | null>(null)
@@ -150,6 +152,22 @@ export default function Home() {
         })
       } catch (error) {
         if (selectedUserRef.current?.id !== currentSelectedUser?.id) return
+
+        // Log failed message decryption to server
+        if (currentUser) {
+          fetch(`${API_URL}/api/logs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              event: "DECRYPTION_FAILED_MESSAGE",
+              userId: currentUser.id,
+              details: `Failed to decrypt message ${message.id} in conversation with ${currentSelectedUser?.id}`,
+              severity: "warning",
+            }),
+          }).catch(() => {
+            // ignore logging failure on client
+          })
+        }
 
         setMessages((prev) => {
           if (prev.find((m) => m.id === message.id)) return prev
@@ -437,6 +455,19 @@ export default function Home() {
               const content = await decrypt(otherUserId, msg.ciphertext, msg.iv, msg.authTag)
               return { ...msg, content, decrypted: true }
             } catch {
+              // Log failed decryption when hydrating history
+              if (currentUser) {
+                fetch(`${API_URL}/api/logs`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    event: "DECRYPTION_FAILED_MESSAGE_HISTORY",
+                    userId: currentUser.id,
+                    details: `Failed to decrypt historical message ${msg.id} in conversation with ${targetUserId}`,
+                    severity: "warning",
+                  }),
+                }).catch(() => {})
+              }
               return { ...msg, decrypted: false, error: "Decryption failed" }
             }
           }),
@@ -529,7 +560,7 @@ export default function Home() {
     }
   }
 
-  const handleLogin = async (username: string, password: string) => {
+  const handleLogin = async (username: string, password: string, totpCode?: string): Promise<void | { requires2FA: boolean }> => {
     setIsAuthLoading(true)
     setAuthError(null)
 
@@ -537,15 +568,22 @@ export default function Home() {
       const response = await fetch(`${API_URL}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, totpCode }),
       })
 
+      const data = await response.json()
+
+      // Check if 2FA is required
+      if (data.requires2FA && !totpCode) {
+        setIsAuthLoading(false)
+        return { requires2FA: true }
+      }
+
       if (!response.ok) {
-        const data = await response.json()
         throw new Error(data.error || "Login failed")
       }
 
-      const user = await response.json()
+      const user = data
 
       const existingKey = await loadIdentityKeys()
       if (!existingKey) {
@@ -619,7 +657,11 @@ export default function Home() {
 
     try {
       const { ciphertext, iv, authTag, nonce } = await encrypt(selectedUser.id, content)
-      const sequenceNumber = messages.length
+      // Use the highest existing sequence number for this conversation and increment it
+      const maxSequence =
+        messages.length > 0 ? Math.max(...messages.map((m) => (typeof m.sequenceNumber === "number" ? m.sequenceNumber : -1))) : -1
+      const sequenceNumber = maxSequence + 1
+      const timestamp = Date.now()
 
       const response = await fetch(`${API_URL}/api/messages`, {
         method: "POST",
@@ -632,6 +674,7 @@ export default function Home() {
           authTag,
           nonce,
           sequenceNumber,
+          timestamp,
         }),
       })
 
@@ -705,6 +748,19 @@ export default function Home() {
       URL.revokeObjectURL(url)
     } catch (error) {
       console.error("Failed to download file:", error)
+      // Log failed file decryption / download
+      if (currentUser && selectedUser) {
+        fetch(`${API_URL}/api/logs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            event: "DECRYPTION_FAILED_FILE",
+            userId: currentUser.id,
+            details: `Failed to download/decrypt file ${fileId} with ${selectedUser.id}`,
+            severity: "warning",
+          }),
+        }).catch(() => {})
+      }
     }
   }
 
@@ -723,6 +779,7 @@ export default function Home() {
         onSelectUser={setSelectedUser}
         onLogout={handleLogout}
         onOpenLogs={() => setShowLogs(true)}
+        onOpenSettings={() => setShowSettings(true)}
         sessionKeys={sessionKeys}
       />
 
@@ -768,6 +825,19 @@ export default function Home() {
       )}
 
       {showLogs && <SecurityLogs onClose={() => setShowLogs(false)} />}
+
+      {showSettings && currentUser && (
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <TwoFactorSetup
+            userId={currentUser.id}
+            username={currentUser.username}
+            onComplete={() => {
+              setShowSettings(false)
+            }}
+            onCancel={() => setShowSettings(false)}
+          />
+        </div>
+      )}
 
       {showKeyExchange && selectedUser && (
         <KeyExchangeModal

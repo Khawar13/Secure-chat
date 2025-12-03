@@ -12,7 +12,7 @@ import { Shield, Key, Lock, Loader2, CheckCircle2, AlertCircle } from "lucide-re
 
 interface AuthFormProps {
   onRegister: (username: string, password: string) => Promise<void>
-  onLogin: (username: string, password: string) => Promise<void>
+  onLogin: (username: string, password: string, totpCode?: string) => Promise<void | { requires2FA: boolean }>
   isLoading: boolean
   error: string | null
 }
@@ -21,6 +21,8 @@ export function AuthForm({ onRegister, onLogin, isLoading, error }: AuthFormProp
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
+  const [totpCode, setTotpCode] = useState("")
+  const [requires2FA, setRequires2FA] = useState(false)
   const [activeTab, setActiveTab] = useState("login")
 
   const handleSubmit = async (e: React.FormEvent, type: "login" | "register") => {
@@ -33,7 +35,10 @@ export function AuthForm({ onRegister, onLogin, isLoading, error }: AuthFormProp
     if (type === "register") {
       await onRegister(username, password)
     } else {
-      await onLogin(username, password)
+      const result = await onLogin(username, password, requires2FA ? totpCode : undefined)
+      if (result && (result as any).requires2FA) {
+        setRequires2FA(true)
+      }
     }
   }
 
@@ -115,6 +120,30 @@ export function AuthForm({ onRegister, onLogin, isLoading, error }: AuthFormProp
                     <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                   </div>
                 </div>
+
+                {requires2FA && (
+                  <div className="space-y-2">
+                    <Label htmlFor="login-totp" className="text-foreground">
+                      Two-Factor Authentication Code
+                    </Label>
+                    <div className="relative">
+                      <Input
+                        id="login-totp"
+                        type="text"
+                        value={totpCode}
+                        onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                        placeholder="000000"
+                        maxLength={6}
+                        className="bg-input border-border focus:border-primary pl-10 text-center text-lg font-mono tracking-widest"
+                        required
+                      />
+                      <Shield className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Enter the 6-digit code from your authenticator app
+                    </p>
+                  </div>
+                )}
 
                 {error && (
                   <div className="flex items-center gap-2 text-destructive text-sm">

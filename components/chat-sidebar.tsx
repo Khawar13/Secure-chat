@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
-import { Shield, Users, Search, LogOut, Lock, Unlock, User, KeyRound, Activity } from "lucide-react"
+import { Shield, Users, Search, LogOut, Lock, Unlock, User, KeyRound, Activity, Settings } from "lucide-react"
 
 interface UserInfo {
   id: string
@@ -20,6 +20,7 @@ interface ChatSidebarProps {
   onSelectUser: (user: UserInfo) => void
   onLogout: () => void
   onOpenLogs: () => void
+  onOpenSettings: () => void
   sessionKeys: Map<string, CryptoKey>
 }
 
@@ -30,6 +31,7 @@ export function ChatSidebar({
   onSelectUser,
   onLogout,
   onOpenLogs,
+  onOpenSettings,
   sessionKeys,
 }: ChatSidebarProps) {
   const [searchQuery, setSearchQuery] = useState("")
@@ -155,6 +157,14 @@ export function ChatSidebar({
 
       {/* Footer actions */}
       <div className="p-4 border-t border-border space-y-2">
+        <Button
+          variant="outline"
+          className="w-full justify-start border-border hover:bg-secondary/50 hover:text-foreground bg-transparent"
+          onClick={onOpenSettings}
+        >
+          <Settings className="w-4 h-4 mr-2" />
+          Settings
+        </Button>
         <Button
           variant="outline"
           className="w-full justify-start border-border hover:bg-secondary/50 hover:text-foreground bg-transparent"

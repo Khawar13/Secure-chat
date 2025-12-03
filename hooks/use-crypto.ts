@@ -26,6 +26,8 @@ import {
 } from "@/lib/crypto-client"
 import { storeKeys, getKeys, getSessionId } from "@/lib/indexed-db"
 
+const API_URL = "http://localhost:5000"
+
 export function useCrypto() {
   const [identityKeyPair, setIdentityKeyPair] = useState<CryptoKeyPair | null>(null)
   const [sessionKeys, setSessionKeys] = useState<Map<string, CryptoKey>>(new Map())
@@ -146,6 +148,21 @@ export function useCrypto() {
           signature,
           dataToVerify,
         })
+        // Log invalid signature to server for auditing
+        try {
+          await fetch(`${API_URL}/api/logs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              event: "INVALID_SIGNATURE_INIT",
+              userId: currentUserId,
+              details: `Invalid signature on key exchange INIT from ${senderId}`,
+              severity: "error",
+            }),
+          })
+        } catch {
+          // ignore logging failure
+        }
       }
 
       if (!isValid) {
@@ -224,6 +241,21 @@ export function useCrypto() {
           responseSignature,
           dataToVerify,
         })
+        
+        try {
+          await fetch(`${API_URL}/api/logs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              event: "INVALID_SIGNATURE_RESPONSE",
+              userId: currentUserId,
+              details: `Invalid signature on key exchange RESPONSE from ${recipientId}`,
+              severity: "error",
+            }),
+          })
+        } catch {
+          // ignore logging failure
+        }
         throw new Error("Invalid response signature - possible MITM attack")
       }
 
@@ -303,6 +335,22 @@ export function useCrypto() {
 
       if (isValid) {
         setConfirmedSessions((prev) => new Set(prev).add(senderId))
+      } else {
+        // Log failed key confirmation as potential attack
+        try {
+          await fetch(`${API_URL}/api/logs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              event: "KEY_CONFIRMATION_FAILED",
+              userId: currentUserId,
+              details: `Key confirmation verification failed for session with ${senderId}`,
+              severity: "warning",
+            }),
+          })
+        } catch {
+          // ignore logging failure
+        }
       }
 
       return isValid

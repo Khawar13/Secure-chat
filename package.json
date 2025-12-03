@@ -6,7 +6,10 @@
     "build": "next build",
     "dev": "next dev",
     "lint": "eslint .",
-    "start": "next start"
+    "start": "next start",
+    "mitm-vulnerable": "npx ts-node scripts/mitm-vulnerable.ts",
+    "mitm-secure": "npx ts-node scripts/mitm-secure.ts",
+    "mitm-demo": "npx ts-node scripts/mitm-vulnerable.ts && npx ts-node scripts/mitm-secure.ts"
   },
   "dependencies": {
     "@aws-sdk/credential-providers": "latest",
