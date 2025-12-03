@@ -46,11 +46,24 @@ export interface KeyExchangeMessage {
   type: "init" | "response" | "confirm"
   senderId: string
   recipientId: string
-  ephemeralPublicKey: string // ECDH public key
+  senderPublicKey?: string // Sender's identity public key (ECDSA) for signature verification
+  ephemeralPublicKey: string // ECDH public key (empty for confirm type)
   signature: string // ECDSA signature of the ephemeral key + timestamp
   timestamp: number
   nonce: string
-  confirmationHash?: string // For key confirmation step
+  // Key confirmation fields
+  confirmationHash?: string // HMAC-SHA256 hash proving session key derivation
+  confirmationNonce?: string // Nonce used in confirmation hash computation
+}
+
+export interface KeyConfirmationMessage {
+  type: "confirm"
+  senderId: string
+  recipientId: string
+  confirmationHash: string // HMAC-SHA256 hash proving session key derivation
+  confirmationNonce: string // Nonce used in confirmation hash computation
+  originalNonce: string // Original nonce from key exchange for verification
+  timestamp: number
 }
 
 export interface SecurityLog {
@@ -60,12 +73,10 @@ export interface SecurityLog {
   details: string
   timestamp: number
   success: boolean
-  severity?: "info" | "warning" | "error"   // optional
-  event?: string                              // optional
+  severity?: "info" | "warning" | "error"
+  event?: string
   ipAddress?: string
 }
-
-
 
 export interface ClientKeyPair {
   publicKey: CryptoKey

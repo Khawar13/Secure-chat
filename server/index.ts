@@ -35,6 +35,7 @@ let filesCollection: Collection
 let logsCollection: Collection
 let sessionsCollection: Collection
 let keyExchangesCollection: Collection
+let keyConfirmationsCollection: Collection
 
 async function connectToMongoDB() {
   try {
@@ -49,6 +50,7 @@ async function connectToMongoDB() {
     logsCollection = db.collection("logs")
     sessionsCollection = db.collection("sessions")
     keyExchangesCollection = db.collection("key_exchanges")
+    keyConfirmationsCollection = db.collection("key_confirmations")
 
     // Create indexes
     await usersCollection.createIndex({ username: 1 }, { unique: true })
@@ -57,6 +59,7 @@ async function connectToMongoDB() {
     await filesCollection.createIndex({ senderId: 1, recipientId: 1 })
     await logsCollection.createIndex({ timestamp: -1 })
     await sessionsCollection.createIndex({ sessionId: 1 }, { unique: true })
+    await keyConfirmationsCollection.createIndex({ senderId: 1, recipientId: 1 })
 
     console.log("Connected to MongoDB Atlas")
   } catch (error) {
@@ -431,13 +434,27 @@ app.get("/api/session-key", async (req, res) => {
 // Key exchange
 app.post("/api/key-exchange", async (req, res) => {
   try {
-    const { type, senderId, recipientId, ephemeralPublicKey, signature, timestamp, nonce } = req.body
+    const { type, senderId, recipientId, senderPublicKey, ephemeralPublicKey, signature, timestamp, nonce } = req.body
+
+    if (
+      !type ||
+      !senderId ||
+      !recipientId ||
+      !senderPublicKey ||
+      !ephemeralPublicKey ||
+      !signature ||
+      !timestamp ||
+      !nonce
+    ) {
+      return res.status(400).json({ error: "Missing required fields" })
+    }
 
     const exchange = {
       id: uuidv4(),
       type,
       senderId,
       recipientId,
+      senderPublicKey,
       ephemeralPublicKey,
       signature,
       timestamp,
@@ -455,6 +472,55 @@ app.post("/api/key-exchange", async (req, res) => {
   } catch (error) {
     console.error("Key exchange error:", error)
     res.status(500).json({ error: "Key exchange failed" })
+  }
+})
+
+app.post("/api/key-confirmation", async (req, res) => {
+  try {
+    const { senderId, recipientId, confirmationHash, confirmationNonce, originalNonce, timestamp } = req.body
+
+    if (!senderId || !recipientId || !confirmationHash || !confirmationNonce || !originalNonce) {
+      return res.status(400).json({ error: "Missing required fields" })
+    }
+
+    // Verify timestamp (within 5 minutes)
+    if (Math.abs(Date.now() - timestamp) > 5 * 60 * 1000) {
+      await addSecurityLog(
+        "KEY_CONFIRMATION_EXPIRED",
+        senderId,
+        `Key confirmation timestamp expired from ${senderId} to ${recipientId}`,
+        "warning",
+      )
+      return res.status(400).json({ error: "Key confirmation timestamp expired" })
+    }
+
+    const confirmation = {
+      id: uuidv4(),
+      type: "confirm",
+      senderId,
+      recipientId,
+      confirmationHash,
+      confirmationNonce,
+      originalNonce,
+      timestamp,
+      createdAt: Date.now(),
+    }
+
+    await keyConfirmationsCollection.insertOne(confirmation)
+    await addSecurityLog(
+      "KEY_CONFIRMATION",
+      senderId,
+      `Key confirmation sent from ${senderId} to ${recipientId}`,
+      "info",
+    )
+
+    // Notify recipient via Socket.io
+    io.to(recipientId).emit("key_confirmation", confirmation)
+
+    res.json(confirmation)
+  } catch (error) {
+    console.error("Key confirmation error:", error)
+    res.status(500).json({ error: "Key confirmation failed" })
   }
 })
 
@@ -510,6 +576,10 @@ io.on("connection", (socket) => {
   // Relay key exchange
   socket.on("key_exchange", (data) => {
     io.to(data.recipientId).emit("key_exchange", data)
+  })
+
+  socket.on("key_confirmation", (data) => {
+    io.to(data.recipientId).emit("key_confirmation", data)
   })
 
   // Relay file notification

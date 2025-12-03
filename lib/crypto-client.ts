@@ -242,15 +242,66 @@ export async function decryptFile(
   )
 }
 
-// Generate key confirmation hash
+// This proves both parties derived the same session key without revealing it
 export async function generateKeyConfirmation(
   sessionKey: CryptoKey,
-  userId: string,
+  senderId: string,
   recipientId: string,
-): Promise<string> {
-  const data = `KEY_CONFIRM:${userId}:${recipientId}:${Date.now()}`
-  const encrypted = await encryptMessage(sessionKey, data)
-  return encrypted.ciphertext
+  nonce: string,
+): Promise<{ confirmationHash: string; confirmationNonce: string }> {
+  // Export session key to compute confirmation hash
+  const exportedKey = await crypto.subtle.exportKey("raw", sessionKey)
+
+  // Generate a confirmation nonce for this specific confirmation message
+  const confirmationNonce = generateNonce()
+
+  // Create deterministic data to hash: KEY_CONFIRM:senderId:recipientId:nonce:confirmationNonce
+  const confirmationData = `KEY_CONFIRM:${senderId}:${recipientId}:${nonce}:${confirmationNonce}`
+
+  // Compute HMAC-SHA256 of the confirmation data using session key as the key
+  const hmacKey = await crypto.subtle.importKey("raw", exportedKey, { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+
+  const confirmationHash = await crypto.subtle.sign("HMAC", hmacKey, new TextEncoder().encode(confirmationData))
+
+  return {
+    confirmationHash: arrayBufferToBase64(confirmationHash),
+    confirmationNonce,
+  }
+}
+
+// Verifies that the other party has derived the same session key
+export async function verifyKeyConfirmation(
+  sessionKey: CryptoKey,
+  senderId: string,
+  recipientId: string,
+  nonce: string,
+  confirmationNonce: string,
+  receivedHash: string,
+): Promise<boolean> {
+  // Export session key to compute expected confirmation hash
+  const exportedKey = await crypto.subtle.exportKey("raw", sessionKey)
+
+  // Recreate the same confirmation data the sender used
+  const confirmationData = `KEY_CONFIRM:${senderId}:${recipientId}:${nonce}:${confirmationNonce}`
+
+  // Compute expected HMAC-SHA256
+  const hmacKey = await crypto.subtle.importKey("raw", exportedKey, { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+
+  const expectedHash = await crypto.subtle.sign("HMAC", hmacKey, new TextEncoder().encode(confirmationData))
+
+  // Compare hashes (constant-time comparison)
+  const expectedHashBase64 = arrayBufferToBase64(expectedHash)
+
+  if (expectedHashBase64.length !== receivedHash.length) {
+    return false
+  }
+
+  let result = 0
+  for (let i = 0; i < expectedHashBase64.length; i++) {
+    result |= expectedHashBase64.charCodeAt(i) ^ receivedHash.charCodeAt(i)
+  }
+
+  return result === 0
 }
 
 // Utility functions

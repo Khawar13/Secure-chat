@@ -1,7 +1,7 @@
 "use client"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Progress } from "@/components/ui/progress"
-import { CheckCircle2, Loader2, Key, Shield, Lock, AlertCircle } from "lucide-react"
+import { CheckCircle2, Loader2, Key, Shield, Lock, AlertCircle, ShieldCheck } from "lucide-react"
 
 interface KeyExchangeModalProps {
   isOpen: boolean
@@ -19,7 +19,7 @@ const steps = [
   { label: "Verifying recipient signature", icon: Shield },
   { label: "Deriving shared secret (ECDH)", icon: Key },
   { label: "Generating session key (HKDF)", icon: Lock },
-  { label: "Key confirmation exchange", icon: CheckCircle2 },
+  { label: "Key confirmation exchange", icon: ShieldCheck },
 ]
 
 export function KeyExchangeModal({ isOpen, onClose, currentStep, error, recipientUsername }: KeyExchangeModalProps) {
@@ -102,10 +102,12 @@ export function KeyExchangeModal({ isOpen, onClose, currentStep, error, recipien
           {isComplete && (
             <div className="p-3 rounded-lg bg-primary/10 border border-primary/30">
               <div className="flex items-center gap-2 text-primary">
-                <CheckCircle2 className="w-4 h-4" />
+                <ShieldCheck className="w-4 h-4" />
                 <span className="text-sm font-medium">Secure Channel Established</span>
               </div>
-              <p className="text-xs text-primary/80 mt-1">All messages will now be encrypted with AES-256-GCM</p>
+              <p className="text-xs text-primary/80 mt-1">
+                Key confirmed. All messages will now be encrypted with AES-256-GCM
+              </p>
             </div>
           )}
         </div>

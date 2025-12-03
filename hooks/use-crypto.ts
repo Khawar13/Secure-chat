@@ -18,6 +18,8 @@ import {
   generateNonce,
   exportSessionKey,
   importSessionKey,
+  generateKeyConfirmation,
+  verifyKeyConfirmation,
 } from "@/lib/crypto-client"
 import { storeKeys, getKeys, getSessionId } from "@/lib/indexed-db"
 
@@ -25,6 +27,7 @@ export function useCrypto() {
   const [identityKeyPair, setIdentityKeyPair] = useState<CryptoKeyPair | null>(null)
   const [sessionKeys, setSessionKeys] = useState<Map<string, CryptoKey>>(new Map())
   const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+  const [confirmedSessions, setConfirmedSessions] = useState<Set<string>>(new Set())
 
   const setUserId = useCallback((userId: string) => {
     setCurrentUserId(userId)
@@ -121,6 +124,7 @@ export function useCrypto() {
       sessionKey: CryptoKey
     }> => {
       if (!identityKeyPair) throw new Error("Identity keys not loaded")
+      if (!currentUserId) throw new Error("Current user ID not set")
 
       // Verify timestamp (within 5 minutes)
       if (Math.abs(Date.now() - timestamp) > 5 * 60 * 1000) {
@@ -129,15 +133,9 @@ export function useCrypto() {
 
       // Import sender's identity public key and verify signature
       const senderIdentityKey = await importECDSAPublicKey(senderPublicKey)
-      const dataToVerify = `${ephemeralPublicKey}:${senderId}:${timestamp}:${nonce}`
+      const dataToVerify = `${ephemeralPublicKey}:${currentUserId}:${timestamp}:${nonce}`
 
-      // Note: The senderId in dataToVerify should be the current user's ID (recipient)
-      // Let me fix this - the sender signs with recipient's ID
-      const isValid = await verifySignature(
-        senderIdentityKey,
-        signature,
-        `${ephemeralPublicKey}:${senderId}:${timestamp}:${nonce}`,
-      )
+      const isValid = await verifySignature(senderIdentityKey, signature, dataToVerify)
 
       if (!isValid) {
         throw new Error("Invalid signature - possible MITM attack")
@@ -150,7 +148,6 @@ export function useCrypto() {
       const responseTimestamp = Date.now()
       const responseNonce = generateNonce()
 
-      // Sign response
       const responseDataToSign = `${responseEphemeralPublicKey}:${senderId}:${responseTimestamp}:${responseNonce}`
       const responseSignature = await signData(identityKeyPair.privateKey, responseDataToSign)
 
@@ -158,12 +155,11 @@ export function useCrypto() {
       const senderEphemeralKey = await importECDHPublicKey(ephemeralPublicKey)
       const sharedSecret = await deriveSharedSecret(responseKeyPair.privateKey, senderEphemeralKey)
 
-      // Derive session key using HKDF
       const salt = `${nonce}:${responseNonce}`
-      const info = `session:${senderId}:${Date.now()}`
+      const info = `session:${senderId}:${currentUserId}`
       const sessionKey = await deriveSessionKey(sharedSecret, salt, info)
 
-      const sessionId = getSessionId(currentUserId || "", senderId)
+      const sessionId = getSessionId(currentUserId, senderId)
       const exportedKey = await exportSessionKey(sessionKey)
       await storeKeys({
         id: `session-${sessionId}`,
@@ -197,6 +193,7 @@ export function useCrypto() {
       ephemeralPrivateKey: CryptoKey,
     ): Promise<CryptoKey> => {
       if (!identityKeyPair) throw new Error("Identity keys not loaded")
+      if (!currentUserId) throw new Error("Current user ID not set")
 
       // Verify timestamp
       if (Math.abs(Date.now() - responseTimestamp) > 5 * 60 * 1000) {
@@ -205,7 +202,7 @@ export function useCrypto() {
 
       // Verify responder's signature
       const recipientIdentityKey = await importECDSAPublicKey(recipientPublicKey)
-      const dataToVerify = `${responseEphemeralPublicKey}:${recipientId}:${responseTimestamp}:${responseNonce}`
+      const dataToVerify = `${responseEphemeralPublicKey}:${currentUserId}:${responseTimestamp}:${responseNonce}`
       const isValid = await verifySignature(recipientIdentityKey, responseSignature, dataToVerify)
 
       if (!isValid) {
@@ -216,12 +213,11 @@ export function useCrypto() {
       const responderEphemeralKey = await importECDHPublicKey(responseEphemeralPublicKey)
       const sharedSecret = await deriveSharedSecret(ephemeralPrivateKey, responderEphemeralKey)
 
-      // Derive session key using same parameters
       const salt = `${originalNonce}:${responseNonce}`
-      const info = `session:${recipientId}:${Date.now()}`
+      const info = `session:${currentUserId}:${recipientId}`
       const sessionKey = await deriveSessionKey(sharedSecret, salt, info)
 
-      const sessionId = getSessionId(currentUserId || "", recipientId)
+      const sessionId = getSessionId(currentUserId, recipientId)
       const exportedKey = await exportSessionKey(sessionKey)
       await storeKeys({
         id: `session-${sessionId}`,
@@ -235,6 +231,91 @@ export function useCrypto() {
     },
     [identityKeyPair, currentUserId],
   )
+
+  const createKeyConfirmation = useCallback(
+    async (
+      recipientId: string,
+      originalNonce: string,
+    ): Promise<{
+      confirmationHash: string
+      confirmationNonce: string
+      timestamp: number
+    }> => {
+      if (!currentUserId) throw new Error("User ID not set")
+
+      const sessionKey = await loadSessionKeyInternal(recipientId)
+      if (!sessionKey) throw new Error("No session key for recipient")
+
+      const { confirmationHash, confirmationNonce } = await generateKeyConfirmation(
+        sessionKey,
+        currentUserId,
+        recipientId,
+        originalNonce,
+      )
+
+      return {
+        confirmationHash,
+        confirmationNonce,
+        timestamp: Date.now(),
+      }
+    },
+    [currentUserId],
+  )
+
+  const verifyReceivedKeyConfirmation = useCallback(
+    async (
+      senderId: string,
+      confirmationHash: string,
+      confirmationNonce: string,
+      originalNonce: string,
+    ): Promise<boolean> => {
+      if (!currentUserId) throw new Error("User ID not set")
+
+      const sessionKey = await loadSessionKeyInternal(senderId)
+      if (!sessionKey) throw new Error("No session key for sender")
+
+      const isValid = await verifyKeyConfirmation(
+        sessionKey,
+        senderId,
+        currentUserId,
+        originalNonce,
+        confirmationNonce,
+        confirmationHash,
+      )
+
+      if (isValid) {
+        setConfirmedSessions((prev) => new Set(prev).add(senderId))
+      }
+
+      return isValid
+    },
+    [currentUserId],
+  )
+
+  const markSessionConfirmed = useCallback((recipientId: string) => {
+    setConfirmedSessions((prev) => new Set(prev).add(recipientId))
+  }, [])
+
+  const isSessionConfirmed = useCallback(
+    (recipientId: string): boolean => {
+      return confirmedSessions.has(recipientId)
+    },
+    [confirmedSessions],
+  )
+
+  // Internal helper to load session key without state updates
+  const loadSessionKeyInternal = async (recipientId: string): Promise<CryptoKey | null> => {
+    const memoryKey = sessionKeys.get(recipientId)
+    if (memoryKey) return memoryKey
+
+    if (!currentUserId) return null
+
+    const sessionId = getSessionId(currentUserId, recipientId)
+    const stored = await getKeys(`session-${sessionId}`)
+    if (!stored) return null
+
+    return await importSessionKey(stored.privateKey)
+  }
 
   const loadSessionKey = useCallback(
     async (recipientId: string): Promise<CryptoKey | null> => {
@@ -268,6 +349,7 @@ export function useCrypto() {
 
       const sessionKey = await importSessionKey(exportedKey)
       setSessionKeys((prev) => new Map(prev).set(recipientId, sessionKey))
+      setConfirmedSessions((prev) => new Set(prev).add(recipientId))
     },
     [currentUserId],
   )
@@ -328,6 +410,7 @@ export function useCrypto() {
   return {
     identityKeyPair,
     sessionKeys,
+    confirmedSessions,
     currentUserId,
     setUserId,
     generateIdentityKeys,
@@ -335,6 +418,10 @@ export function useCrypto() {
     initiateKeyExchange,
     respondToKeyExchange,
     completeKeyExchange,
+    createKeyConfirmation,
+    verifyReceivedKeyConfirmation,
+    markSessionConfirmed,
+    isSessionConfirmed,
     loadSessionKey,
     storeSessionKeyForUser,
     encrypt,

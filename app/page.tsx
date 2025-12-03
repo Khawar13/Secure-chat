@@ -10,8 +10,9 @@ import { useCrypto } from "@/hooks/use-crypto"
 import { useSocket } from "@/hooks/use-socket"
 import type { Message, KeyExchangeMessage } from "@/lib/types"
 import { Shield, Key, Lock } from "lucide-react"
+import type { KeyConfirmationMessage } from "@/lib/types" // Declare the variable here
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"
+const API_URL = "http://localhost:5000"
 
 interface UserInfo {
   id: string
@@ -53,6 +54,8 @@ export default function Home() {
     nonce: string
   } | null>(null)
 
+  const [pendingConfirmations, setPendingConfirmations] = useState<Map<string, string>>(new Map())
+
   // Crypto hooks
   const {
     generateIdentityKeys,
@@ -60,6 +63,10 @@ export default function Home() {
     initiateKeyExchange,
     respondToKeyExchange,
     completeKeyExchange,
+    createKeyConfirmation,
+    verifyReceivedKeyConfirmation,
+    markSessionConfirmed,
+    isSessionConfirmed,
     loadSessionKey,
     storeSessionKeyForUser,
     encrypt,
@@ -67,8 +74,11 @@ export default function Home() {
     encryptFileData,
     decryptFileData,
     sessionKeys,
+    confirmedSessions,
     setUserId,
   } = useCrypto()
+
+  const [myPublicKey, setMyPublicKey] = useState<string | null>(null)
 
   useEffect(() => {
     if (currentUser) {
@@ -85,6 +95,17 @@ export default function Home() {
     setMessages([])
     setFiles([])
   }, [selectedUser?.id])
+
+  useEffect(() => {
+    const initCrypto = async () => {
+      let publicKey = await loadIdentityKeys()
+      if (!publicKey) {
+        publicKey = await generateIdentityKeys()
+      }
+      setMyPublicKey(publicKey)
+    }
+    initCrypto()
+  }, [generateIdentityKeys, loadIdentityKeys])
 
   const checkAndLoadSessionKey = useCallback(
     async (userId: string, recipientId: string) => {
@@ -142,22 +163,39 @@ export default function Home() {
   // Handle incoming key exchange messages
   const handleKeyExchange = useCallback(
     async (data: KeyExchangeMessage) => {
-      if (!currentUser) return
+      console.log("[v0] handleKeyExchange received:", {
+        type: data.type,
+        senderId: data.senderId,
+        recipientId: data.recipientId,
+        currentUserId: currentUser?.id,
+      })
+
+      if (!currentUser) {
+        console.log("[v0] handleKeyExchange: No current user, returning")
+        return
+      }
 
       try {
         if (data.type === "init" && data.recipientId === currentUser.id) {
-          const sender = users.find((u) => u.id === data.senderId)
-          if (!sender) return
+          console.log("[v0] Processing key exchange INIT as responder")
 
+          if (!data.senderPublicKey) {
+            console.log("[v0] Missing senderPublicKey in key exchange init")
+            return
+          }
+
+          console.log("[v0] Calling respondToKeyExchange with senderPublicKey from message...")
           const response = await respondToKeyExchange(
             data.senderId,
-            sender.publicKey,
+            data.senderPublicKey, // Use public key from message
             data.ephemeralPublicKey,
             data.signature,
             data.timestamp,
             data.nonce,
           )
+          console.log("[v0] respondToKeyExchange completed")
 
+          console.log("[v0] Sending key exchange response to server...")
           await fetch(`${API_URL}/api/key-exchange`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -165,21 +203,55 @@ export default function Home() {
               type: "response",
               senderId: currentUser.id,
               recipientId: data.senderId,
+              senderPublicKey: myPublicKey, // Include responder's identity public key
               ephemeralPublicKey: response.responseEphemeralPublicKey,
               signature: response.responseSignature,
               timestamp: response.responseTimestamp,
               nonce: response.responseNonce,
             }),
           })
-        } else if (data.type === "response" && data.recipientId === currentUser.id && pendingKeyExchange) {
-          const sender = users.find((u) => u.id === data.senderId)
-          if (!sender) return
+          console.log("[v0] Key exchange response sent")
+
+          console.log("[v0] Creating key confirmation...")
+          const confirmation = await createKeyConfirmation(data.senderId, data.nonce)
+          console.log("[v0] Key confirmation created:", confirmation)
+
+          console.log("[v0] Sending key confirmation to server...")
+          await fetch(`${API_URL}/api/key-confirmation`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "confirm",
+              senderId: currentUser.id,
+              recipientId: data.senderId,
+              confirmationHash: confirmation.confirmationHash,
+              confirmationNonce: confirmation.confirmationNonce,
+              originalNonce: data.nonce,
+              timestamp: confirmation.timestamp,
+            }),
+          })
+          console.log("[v0] Key confirmation sent")
+
+          // Store original nonce so we can verify initiator's confirmation later
+          setPendingConfirmations((prev) => new Map(prev).set(data.senderId, data.nonce))
+        } else if (data.type === "response" && data.recipientId === currentUser.id) {
+          console.log("[v0] Processing key exchange RESPONSE as initiator")
+
+          if (!pendingKeyExchange || pendingKeyExchange.recipientId !== data.senderId) {
+            console.log("[v0] No pending key exchange or recipient mismatch")
+            return
+          }
+
+          if (!data.senderPublicKey) {
+            console.log("[v0] Missing senderPublicKey in key exchange response")
+            return
+          }
 
           setKeyExchangeStep(4)
 
-          await completeKeyExchange(
+          const sessionKey = await completeKeyExchange(
             data.senderId,
-            sender.publicKey,
+            data.senderPublicKey, // Use public key from message
             data.ephemeralPublicKey,
             data.signature,
             data.timestamp,
@@ -187,22 +259,128 @@ export default function Home() {
             pendingKeyExchange.nonce,
             pendingKeyExchange.ephemeralPrivateKey,
           )
+          console.log("[v0] completeKeyExchange done")
 
-          setKeyExchangeStep(7)
-          setPendingKeyExchange(null)
-          setIsExchangingKeys(false)
+          setKeyExchangeStep(5)
+          console.log("[v0] Step 5 - Deriving session key...")
 
-          setTimeout(() => {
-            setShowKeyExchange(false)
-          }, 2000)
+          const confirmation = await createKeyConfirmation(data.senderId, pendingKeyExchange.nonce)
+          console.log("[v0] Key confirmation created by initiator")
+
+          await fetch(`${API_URL}/api/key-confirmation`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "confirm",
+              senderId: currentUser.id,
+              recipientId: data.senderId,
+              confirmationHash: confirmation.confirmationHash,
+              confirmationNonce: confirmation.confirmationNonce,
+              originalNonce: pendingKeyExchange.nonce,
+              timestamp: confirmation.timestamp,
+            }),
+          })
+          console.log("[v0] Key confirmation sent by initiator")
+
+          setKeyExchangeStep(6)
+
+          // Store original nonce so we can verify responder's confirmation
+          setPendingConfirmations((prev) => new Map(prev).set(data.senderId, pendingKeyExchange.nonce))
         }
       } catch (error) {
-        console.error("Key exchange error:", error)
+        console.error("[v0] Key exchange error:", error)
         setKeyExchangeError(error instanceof Error ? error.message : "Key exchange failed")
         setIsExchangingKeys(false)
       }
     },
-    [currentUser, users, pendingKeyExchange, respondToKeyExchange, completeKeyExchange],
+    [currentUser, respondToKeyExchange, completeKeyExchange, createKeyConfirmation, pendingKeyExchange, myPublicKey],
+  )
+
+  const handleKeyConfirmation = useCallback(
+    async (data: KeyConfirmationMessage) => {
+      console.log("[v0] handleKeyConfirmation received:", {
+        senderId: data.senderId,
+        recipientId: data.recipientId,
+        currentUserId: currentUser?.id,
+      })
+
+      if (!currentUser) {
+        console.log("[v0] handleKeyConfirmation: No current user")
+        return
+      }
+      if (data.recipientId !== currentUser.id) {
+        console.log("[v0] handleKeyConfirmation: Not for this user")
+        return
+      }
+
+      try {
+        console.log("[v0] Verifying received key confirmation...")
+        // Verify the confirmation
+        const isValid = await verifyReceivedKeyConfirmation(
+          data.senderId,
+          data.confirmationHash,
+          data.confirmationNonce,
+          data.originalNonce,
+        )
+        console.log("[v0] Key confirmation verification result:", isValid)
+
+        if (isValid) {
+          console.log(`[v0] Key confirmation verified from ${data.senderId}`)
+          markSessionConfirmed(data.senderId)
+
+          // Remove from pending confirmations
+          setPendingConfirmations((prev) => {
+            const newMap = new Map(prev)
+            newMap.delete(data.senderId)
+            return newMap
+          })
+
+          // If this was the initiator waiting for confirmation, complete the exchange
+          if (pendingKeyExchange && pendingKeyExchange.recipientId === data.senderId) {
+            console.log("[v0] Completing key exchange as initiator")
+            setKeyExchangeStep(7)
+            setPendingKeyExchange(null)
+            setIsExchangingKeys(false)
+
+            // Store session key on server for persistence
+            const { exportSessionKey } = await import("@/lib/crypto-client")
+            const sessionKey = await loadSessionKey(data.senderId)
+            if (sessionKey) {
+              const exportedKey = await exportSessionKey(sessionKey)
+              await fetch(`${API_URL}/api/session-key`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  userId1: currentUser.id,
+                  userId2: data.senderId,
+                  exportedKey,
+                }),
+              })
+              console.log("[v0] Session key stored on server")
+            }
+
+            setTimeout(() => {
+              setShowKeyExchange(false)
+            }, 2000)
+          } else {
+            console.log("[v0] Key confirmation received but not initiator or no pending exchange", {
+              hasPendingExchange: !!pendingKeyExchange,
+              pendingRecipientId: pendingKeyExchange?.recipientId,
+              senderId: data.senderId,
+            })
+          }
+        } else {
+          console.error("[v0] Key confirmation verification failed - possible attack!")
+          setKeyExchangeError("Key confirmation failed - the other party may have a different session key")
+          setIsExchangingKeys(false)
+        }
+      } catch (error) {
+        console.error("[v0] Key confirmation error:", error)
+        setKeyExchangeError(error instanceof Error ? error.message : "Key confirmation failed")
+        setIsExchangingKeys(false)
+      }
+    },
+    [currentUser, pendingKeyExchange, verifyReceivedKeyConfirmation, markSessionConfirmed, loadSessionKey],
   )
 
   // Handle new file notification
@@ -214,10 +392,11 @@ export default function Home() {
   }, [])
 
   // Socket connection
-  const { isConnected, sendEncryptedMessage, sendKeyExchange, notifyFileShared } = useSocket({
+  const { isConnected, sendEncryptedMessage, sendKeyExchange, sendKeyConfirmation, notifyFileShared } = useSocket({
     userId: currentUser?.id || null,
     onNewMessage: handleNewMessage,
     onKeyExchange: handleKeyExchange,
+    onKeyConfirmation: handleKeyConfirmation,
     onNewFile: handleNewFile,
     onError: (error) => {
       console.error("Socket error:", error)
@@ -389,7 +568,7 @@ export default function Home() {
   }
 
   const handleInitiateKeyExchange = async () => {
-    if (!currentUser || !selectedUser) return
+    if (!currentUser || !selectedUser || !myPublicKey) return
 
     setIsExchangingKeys(true)
     setShowKeyExchange(true)
@@ -419,6 +598,7 @@ export default function Home() {
           type: "init",
           senderId: currentUser.id,
           recipientId: selectedUser.id,
+          senderPublicKey: myPublicKey, // Include sender's identity public key
           ephemeralPublicKey: exchangeData.ephemeralPublicKey,
           signature: exchangeData.signature,
           timestamp: exchangeData.timestamp,
@@ -427,49 +607,6 @@ export default function Home() {
       })
 
       setKeyExchangeStep(3)
-      await new Promise((r) => setTimeout(r, 1000))
-      setKeyExchangeStep(4)
-      await new Promise((r) => setTimeout(r, 500))
-      setKeyExchangeStep(5)
-      await new Promise((r) => setTimeout(r, 500))
-      setKeyExchangeStep(6)
-      await new Promise((r) => setTimeout(r, 500))
-      setKeyExchangeStep(7)
-
-      const { deriveSessionKey, exportSessionKey } = await import("@/lib/crypto-client")
-
-      const encoder = new TextEncoder()
-      const sortedIds = [currentUser.id, selectedUser.id].sort().join(":")
-      const deterministicSecret = await crypto.subtle.digest("SHA-256", encoder.encode(sortedIds + exchangeData.nonce))
-
-      const sessionKey = await deriveSessionKey(deterministicSecret, exchangeData.nonce, `session:${sortedIds}`)
-
-      const exportedKey = await exportSessionKey(sessionKey)
-
-      const { storeKeys, getSessionId } = await import("@/lib/indexed-db")
-      const sessionId = getSessionId(currentUser.id, selectedUser.id)
-      await storeKeys({
-        id: `session-${sessionId}`,
-        publicKey: exchangeData.ephemeralPublicKey,
-        privateKey: exportedKey,
-      })
-
-      await fetch(`${API_URL}/api/session-key`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId1: currentUser.id,
-          userId2: selectedUser.id,
-          exportedKey,
-        }),
-      })
-
-      await loadSessionKey(selectedUser.id)
-
-      setTimeout(() => {
-        setShowKeyExchange(false)
-        setIsExchangingKeys(false)
-      }, 2000)
     } catch (error) {
       console.error("Key exchange error:", error)
       setKeyExchangeError(error instanceof Error ? error.message : "Key exchange failed")
@@ -616,12 +753,14 @@ export default function Home() {
               <div className="p-4 rounded-lg bg-card border border-border">
                 <Key className="w-6 h-6 text-primary mb-2" />
                 <h3 className="font-semibold text-foreground">ECDH Key Exchange</h3>
-                <p className="text-sm text-muted-foreground">Secure key establishment with signature verification</p>
+                <p className="text-xs text-muted-foreground">
+                  Secure key agreement with digital signatures and key confirmation
+                </p>
               </div>
               <div className="p-4 rounded-lg bg-card border border-border">
                 <Lock className="w-6 h-6 text-primary mb-2" />
                 <h3 className="font-semibold text-foreground">AES-256-GCM</h3>
-                <p className="text-sm text-muted-foreground">Military-grade encryption for all messages</p>
+                <p className="text-xs text-muted-foreground">Military-grade encryption for all messages and files</p>
               </div>
             </div>
           </div>
@@ -630,16 +769,16 @@ export default function Home() {
 
       {showLogs && <SecurityLogs onClose={() => setShowLogs(false)} />}
 
-      {showKeyExchange && (
+      {showKeyExchange && selectedUser && (
         <KeyExchangeModal
           isOpen={showKeyExchange}
+          currentStep={keyExchangeStep}
+          error={keyExchangeError}
+          recipientUsername={selectedUser.username}
           onClose={() => {
             setShowKeyExchange(false)
             setIsExchangingKeys(false)
           }}
-          currentStep={keyExchangeStep}
-          error={keyExchangeError}
-          recipientUsername={selectedUser?.username || "Unknown"}
         />
       )}
     </div>
